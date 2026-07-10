@@ -9,35 +9,30 @@ export function useVisionApi() {
     setIsLoading(true);
     setError(null);
     try {
-      // Simulate API call for the frontend functionality
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const response = await fetch('/api/analyze-prescription/route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64Image })
+      });
       
-      const result = {
-        patientName: "John Doe",
-        medications: [
-          {
-            id: crypto.randomUUID(),
-            medicineName: "Metformin",
-            dosage: "500 mg",
-            schedule: { morning: true, afternoon: false, night: true },
-            mealInstruction: "After Food",
-            specialNotes: null
-          },
-          {
-            id: crypto.randomUUID(),
-            medicineName: "Aspirin",
-            dosage: "75 mg",
-            schedule: { morning: true, afternoon: false, night: false },
-            mealInstruction: "Independent",
-            specialNotes: "Take with water"
-          }
-        ]
-      };
+      const result = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(result.error || 'Failed to analyze prescription');
+      }
+
+      // Add unique IDs to the result medications for React keys
+      if (result.medications && Array.isArray(result.medications)) {
+        result.medications = result.medications.map(med => ({
+          ...med,
+          id: crypto.randomUUID()
+        }));
+      }
       
       setData(result);
       return result;
     } catch (err) {
-      setError(err.message || 'Failed to analyze prescription');
+      setError(err.message || 'Failed to analyze prescription. Make sure your GEMINI_API_KEY is configured.');
       return null;
     } finally {
       setIsLoading(false);
