@@ -25,6 +25,12 @@ function App() {
     }
   };
 
+  const handleRetry = () => {
+    if (imageSrc) {
+      handleImageProcessed(imageSrc);
+    }
+  };
+
   const handleGenerate = () => {
     setAppState('POSTER');
   };
@@ -53,11 +59,25 @@ function App() {
               <p className="text-xl text-gray-600">Upload a photo of your doctor's prescription or pill strip, and we'll automatically create a beautiful, easy-to-read printable poster.</p>
             </div>
             
-            {error && (
-              <div className="bg-rose-50 border border-rose-400 text-rose-700 p-4 rounded-lg mb-6 text-lg font-bold">
-                {error}
+            {error && error.type === 'rate_limit' ? (
+              <div className="bg-red-50 border-2 border-red-400 text-red-900 p-6 rounded-xl mb-6 text-center shadow-sm">
+                <svg className="w-12 h-12 text-red-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <h3 className="text-2xl font-black mb-2">System Busy</h3>
+                <p className="text-xl font-medium mb-6">{error.message}</p>
+                <button 
+                  onClick={handleRetry} 
+                  className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-lg text-lg transition-colors shadow-md"
+                >
+                  Retry Analysis
+                </button>
               </div>
-            )}
+            ) : error ? (
+              <div className="bg-rose-50 border border-rose-400 text-rose-700 p-4 rounded-lg mb-6 text-lg font-bold text-center">
+                {error.message || error}
+              </div>
+            ) : null}
 
             {isLoading ? (
               <div className="text-center py-20">
@@ -66,15 +86,17 @@ function App() {
                 <p className="text-lg text-gray-500">Extracting medication names and schedules</p>
               </div>
             ) : (
-              <div className="space-y-6">
-                <Dropzone onImageProcessed={handleImageProcessed} />
-                <div className="relative flex py-5 items-center">
-                  <div className="flex-grow border-t border-gray-300"></div>
-                  <span className="flex-shrink-0 mx-4 text-gray-400 font-bold">OR</span>
-                  <div className="flex-grow border-t border-gray-300"></div>
+              !error || error.type !== 'rate_limit' ? (
+                <div className="space-y-6">
+                  <Dropzone onImageProcessed={handleImageProcessed} />
+                  <div className="relative flex py-5 items-center">
+                    <div className="flex-grow border-t border-gray-300"></div>
+                    <span className="flex-shrink-0 mx-4 text-gray-400 font-bold">OR</span>
+                    <div className="flex-grow border-t border-gray-300"></div>
+                  </div>
+                  <CameraCapture onImageProcessed={handleImageProcessed} />
                 </div>
-                <CameraCapture onImageProcessed={handleImageProcessed} />
-              </div>
+              ) : null
             )}
           </div>
         )}

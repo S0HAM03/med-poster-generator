@@ -6,7 +6,7 @@ export const config = {
 
 export default async function handler(req) {
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { 
+    return new Response(JSON.stringify({ error: 'method_not_allowed', message: 'Method not allowed' }), { 
       status: 405,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -17,14 +17,14 @@ export default async function handler(req) {
     const { image } = body;
     
     if (!image) {
-      return new Response(JSON.stringify({ error: "No image provided" }), { 
+      return new Response(JSON.stringify({ error: "bad_request", message: "No image provided" }), { 
         status: 400,
         headers: { 'Content-Type': 'application/json' }
       });
     }
     
     if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-      return new Response(JSON.stringify({ error: "GEMINI_API_KEY is not configured in .env" }), { 
+      return new Response(JSON.stringify({ error: "config_error", message: "GEMINI_API_KEY is not configured in .env" }), { 
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -32,7 +32,6 @@ export default async function handler(req) {
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     
-    // Remove data URI prefix if present
     const base64Data = image.includes(',') ? image.split(',')[1] : image;
     
     const prompt = `
@@ -95,20 +94,46 @@ OUTPUT FORMAT RULES:
       required: ["medications"]
     };
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-1.5-flash',
-      contents: [
-        { role: 'user', parts: [
-          { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-          { text: prompt }
-        ]}
-      ],
-      config: {
-        temperature: 0.0,
-        responseMimeType: "application/json",
-        responseSchema: schema
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          { role: 'user', parts: [
+            { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
+            { text: prompt }
+          ]}
+        ],
+        config: {
+          temperature: 0.0,
+          responseMimeType: "application/json",
+          responseSchema: schema
+        }
+      });
+    } catch (sdkError) {
+      console.error("SDK Error details:", sdkError);
+      
+      const status = sdkError?.status || sdkError?.response?.status || 500;
+      
+      if (status === 429) {
+        return new Response(JSON.stringify({ 
+          error: "rate_limit", 
+          message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+        }), { 
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
       }
-    });
+
+      // Default to unreadable for 500 or any other API refusal
+      return new Response(JSON.stringify({ 
+        error: "unreadable", 
+        message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
+      }), { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
     return new Response(response.text, {
       status: 200,
@@ -116,17 +141,11 @@ OUTPUT FORMAT RULES:
     });
 
   } catch (error) {
-    console.error("AI processing error:", error);
-    
-    // Check for rate limits or other specific errors
-    if (error.status === 429) {
-      return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), { 
-        status: 429,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    return new Response(JSON.stringify({ error: "Failed to process image. It might be too blurry or our servers are busy. Please try again." }), { 
+    console.error("Outer request processing error:", error);
+    return new Response(JSON.stringify({ 
+      error: "unreadable", 
+      message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
+    }), { 
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });

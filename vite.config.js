@@ -92,7 +92,9 @@ OUTPUT FORMAT RULES:
                 required: ["medications"]
               };
 
-              const response = await ai.models.generateContent({
+            let response;
+            try {
+              response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: [
                   { role: 'user', parts: [
@@ -106,17 +108,41 @@ OUTPUT FORMAT RULES:
                   responseSchema: schema
                 }
               });
-
+            } catch (sdkError) {
+              console.error("SDK Error details:", sdkError);
+              
+              const status = sdkError?.status || sdkError?.response?.status || 500;
+              
               res.setHeader('Content-Type', 'application/json');
-              res.statusCode = 200;
-              res.end(response.text);
+              
+              if (status === 429) {
+                res.statusCode = 429;
+                return res.end(JSON.stringify({ 
+                  error: "rate_limit", 
+                  message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+                }));
+              }
 
-            } catch (error) {
-              console.error("AI processing error:", error);
-              res.setHeader('Content-Type', 'application/json');
               res.statusCode = 500;
-              res.end(JSON.stringify({ error: error.message }));
+              return res.end(JSON.stringify({ 
+                error: "unreadable", 
+                message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
+              }));
             }
+
+            res.setHeader('Content-Type', 'application/json');
+            res.statusCode = 200;
+            res.end(response.text);
+
+          } catch (error) {
+            console.error("Outer request processing error:", error);
+            res.setHeader('Content-Type', 'application/json');
+            res.statusCode = 500;
+            res.end(JSON.stringify({ 
+              error: "unreadable", 
+              message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
+            }));
+          }
           });
         } else {
           next();

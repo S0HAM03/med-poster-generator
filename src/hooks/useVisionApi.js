@@ -18,7 +18,11 @@ export function useVisionApi() {
       const result = await response.json();
       
       if (!response.ok) {
-        throw new Error(result.error || 'Failed to analyze prescription');
+        // Throw an object containing the specific error type and message
+        throw {
+          type: result.error || "unknown",
+          message: result.message || "Failed to analyze prescription."
+        };
       }
 
       // Add unique IDs to the result medications for React keys
@@ -32,7 +36,14 @@ export function useVisionApi() {
       setData(result);
       return result;
     } catch (err) {
-      setError(err.message || 'Failed to analyze prescription. Make sure your GEMINI_API_KEY is configured.');
+      if (err.type) {
+        setError(err);
+      } else {
+        setError({
+          type: "unknown",
+          message: err.message || 'Failed to analyze prescription. Make sure your GEMINI_API_KEY is configured.'
+        });
+      }
       return null;
     } finally {
       setIsLoading(false);
