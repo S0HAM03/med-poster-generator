@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 
 export const config = {
   runtime: 'edge',
@@ -23,14 +23,22 @@ export default async function handler(req) {
       });
     }
     
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-      return new Response(JSON.stringify({ error: "config_error", message: "GEMINI_API_KEY is not configured in .env" }), { 
+    if (!process.env.GROQ_API_KEY || !process.env.OPENROUTER_API_KEY) {
+      return new Response(JSON.stringify({ error: "config_error", message: "GROQ_API_KEY or OPENROUTER_API_KEY is not configured in .env" }), { 
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const groq = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1"
+    });
+
+    const openrouter = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: "https://openrouter.ai/api/v1"
+    });
     
     const base64Data = image.includes(',') ? image.split(',')[1] : image;
     
@@ -60,72 +68,106 @@ DATA EXTRACTION EXPECTATIONS:
 OUTPUT FORMAT RULES:
 - You must output raw, unformatted, parseable JSON matching the exact schema.
 - Ensure all quotes are escaped properly and JSON syntax is flawless.
+
+JSON SCHEMA STRUCTURE:
+{
+  "patientName": "string | null",
+  "medications": [
+    {
+      "medicineName": "string",
+      "dosage": "string",
+      "schedule": {
+        "morning": boolean,
+        "afternoon": boolean,
+        "night": boolean
+      },
+      "mealInstruction": "Before Food" | "After Food" | "Independent",
+      "specialNotes": "string | null"
+    }
+  ]
+}
 `;
 
-    const schema = {
-      type: "object",
-      properties: {
-        patientName: { type: "string" },
-        medications: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              medicineName: { type: "string" },
-              dosage: { type: "string" },
-              schedule: {
-                type: "object",
-                properties: {
-                  morning: { type: "boolean" },
-                  afternoon: { type: "boolean" },
-                  night: { type: "boolean" }
-                }
-              },
-              mealInstruction: { 
-                type: "string", 
-                enum: ["Before Food", "After Food", "Independent"] 
-              },
-              specialNotes: { type: "string" }
-            },
-            required: ["medicineName", "dosage", "schedule", "mealInstruction"]
-          }
+    const validateSchema = (dataStr) => {
+      try {
+        const parsed = JSON.parse(dataStr);
+        if (!parsed.medications || !Array.isArray(parsed.medications)) {
+          return false;
         }
-      },
-      required: ["medications"]
+        return true;
+      } catch {
+        return false;
+      }
     };
 
-    let response;
+    let responseText;
+
     try {
-      response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [
-          { role: 'user', parts: [
-            { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-            { text: prompt }
-          ]}
+      // Primary Engine: Groq
+      const response = await groq.chat.completions.create({
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: [
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Data}` } }
+            ]
+          }
         ],
-        config: {
-          temperature: 0.0,
-          responseMimeType: "application/json",
-          responseSchema: schema
-        }
+        response_format: { type: "json_object" },
+        temperature: 0.0
       });
-    } catch (sdkError) {
-      console.error("SDK Error details:", sdkError);
       
-      const status = sdkError?.status || sdkError?.response?.status || 500;
+      responseText = response.choices[0].message.content;
+
+    } catch (primaryError) {
+      console.warn("Groq Primary Engine Failed. Engaging Waterfall Fallback to OpenRouter...", primaryError.message);
       
-      if (status === 429) {
+      try {
+        // Fallback Engine 1A: OpenRouter
+        const fallbackResponse = await openrouter.chat.completions.create({
+          model: "google/gemma-4-26b-a4b-it:free",
+          messages: [
+            { role: "system", content: prompt },
+            { role: "user", content: [
+                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Data}` } }
+              ]
+            }
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.0
+        });
+        
+        responseText = fallbackResponse.choices[0].message.content;
+
+      } catch (sdkError) {
+        console.error("OpenRouter Fallback also failed:", sdkError);
+        
+        const status = sdkError?.status || sdkError?.response?.status || 500;
+        
+        if (status === 429) {
+          return new Response(JSON.stringify({ 
+            error: "rate_limit", 
+            message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+          }), { 
+            status: 429,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Default to unreadable for 500 or any other API refusal
         return new Response(JSON.stringify({ 
-          error: "rate_limit", 
-          message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+          error: "unreadable", 
+          message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
         }), { 
-          status: 429,
+          status: 500,
           headers: { 'Content-Type': 'application/json' }
         });
       }
+    }
 
-      // Default to unreadable for 500 or any other API refusal
+    // Edge Safety Structural Validation
+    if (!validateSchema(responseText)) {
+      console.error("Failed structural validation. LLM hallucinated JSON schema.");
       return new Response(JSON.stringify({ 
         error: "unreadable", 
         message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
@@ -135,7 +177,7 @@ OUTPUT FORMAT RULES:
       });
     }
 
-    return new Response(response.text, {
+    return new Response(responseText, {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });

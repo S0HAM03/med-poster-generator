@@ -1,7 +1,5 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
-import { GoogleGenAI } from '@google/genai'
-
 function apiPlugin(env) {
   return {
     name: 'api-plugin',
@@ -14,24 +12,21 @@ function apiPlugin(env) {
           });
           req.on('end', async () => {
             try {
-              const data = JSON.parse(body);
-              const { image } = data;
-              
-              if (!image) {
-                res.statusCode = 400;
-                return res.end(JSON.stringify({ error: "No image provided" }));
-              }
-              
-              if (!env.GEMINI_API_KEY || env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-                res.statusCode = 500;
-                return res.end(JSON.stringify({ error: "GEMINI_API_KEY is not configured in .env" }));
-              }
-
-              const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
-              
-              // Remove data URI prefix if present
+              const { image } = JSON.parse(body);
               const base64Data = image.includes(',') ? image.split(',')[1] : image;
+
+              const { OpenAI } = await import('openai');
               
+              const groq = new OpenAI({
+                apiKey: env.GROQ_API_KEY,
+                baseURL: "https://api.groq.com/openai/v1"
+              });
+
+              const openrouter = new OpenAI({
+                apiKey: env.OPENROUTER_API_KEY,
+                baseURL: "https://openrouter.ai/api/v1"
+              });
+
               const prompt = `
 ROLE AND CONTEXT:
 You are an advanced, hyper-accurate medical data extraction system specializing in pharmacotherapy syntax, clinical handwriting analysis, and pharmaceutical packaging structures. Your sole purpose is to analyze photographs of medical documentation (handwritten prescriptions, printed medical summaries, or pill strips) and convert them into a structured, standardized schema for elderly patient visualization.
@@ -58,91 +53,124 @@ DATA EXTRACTION EXPECTATIONS:
 OUTPUT FORMAT RULES:
 - You must output raw, unformatted, parseable JSON matching the exact schema.
 - Ensure all quotes are escaped properly and JSON syntax is flawless.
+
+JSON SCHEMA STRUCTURE:
+{
+  "patientName": "string | null",
+  "medications": [
+    {
+      "medicineName": "string",
+      "dosage": "string",
+      "schedule": {
+        "morning": boolean,
+        "afternoon": boolean,
+        "night": boolean
+      },
+      "mealInstruction": "Before Food" | "After Food" | "Independent",
+      "specialNotes": "string | null"
+    }
+  ]
+}
 `;
 
-              const schema = {
-                type: "object",
-                properties: {
-                  patientName: { type: "string" },
-                  medications: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        medicineName: { type: "string" },
-                        dosage: { type: "string" },
-                        schedule: {
-                          type: "object",
-                          properties: {
-                            morning: { type: "boolean" },
-                            afternoon: { type: "boolean" },
-                            night: { type: "boolean" }
-                          }
-                        },
-                        mealInstruction: { 
-                          type: "string", 
-                          enum: ["Before Food", "After Food", "Independent"] 
-                        },
-                        specialNotes: { type: "string" }
-                      },
-                      required: ["medicineName", "dosage", "schedule", "mealInstruction"]
-                    }
+              const validateSchema = (dataStr) => {
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  if (!parsed.medications || !Array.isArray(parsed.medications)) {
+                    return false;
                   }
-                },
-                required: ["medications"]
+                  return true;
+                } catch {
+                  return false;
+                }
               };
 
-            let response;
-            try {
-              response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [
-                  { role: 'user', parts: [
-                    { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-                    { text: prompt }
-                  ]}
-                ],
-                config: {
-                  temperature: 0.0,
-                  responseMimeType: "application/json",
-                  responseSchema: schema
+              let responseText;
+
+              try {
+                // Primary Engine: Groq
+                const response = await groq.chat.completions.create({
+                  model: "meta-llama/llama-4-scout-17b-16e-instruct",
+                  messages: [
+                    { role: "system", content: prompt },
+                    { role: "user", content: [
+                        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Data}` } }
+                      ]
+                    }
+                  ],
+                  response_format: { type: "json_object" },
+                  temperature: 0.0
+                });
+                
+                responseText = response.choices[0].message.content;
+
+              } catch (primaryError) {
+                console.warn("Groq Primary Engine Failed. Engaging Waterfall Fallback to OpenRouter...", primaryError.message);
+                
+                try {
+                  // Fallback Engine 1A: OpenRouter
+                  const fallbackResponse = await openrouter.chat.completions.create({
+                    model: "google/gemma-4-26b-a4b-it:free",
+                    messages: [
+                      { role: "system", content: prompt },
+                      { role: "user", content: [
+                          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Data}` } }
+                        ]
+                      }
+                    ],
+                    response_format: { type: "json_object" },
+                    temperature: 0.0
+                  });
+                  
+                  responseText = fallbackResponse.choices[0].message.content;
+
+                } catch (sdkError) {
+                  console.error("OpenRouter Fallback also failed:", sdkError);
+                  
+                  const status = sdkError?.status || sdkError?.response?.status || 500;
+                  
+                  res.setHeader('Content-Type', 'application/json');
+                  
+                  if (status === 429) {
+                    res.statusCode = 429;
+                    return res.end(JSON.stringify({ 
+                      error: "rate_limit", 
+                      message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+                    }));
+                  }
+
+                  res.statusCode = 500;
+                  return res.end(JSON.stringify({ 
+                    error: "unreadable", 
+                    message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
+                  }));
                 }
-              });
-            } catch (sdkError) {
-              console.error("SDK Error details:", sdkError);
-              
-              const status = sdkError?.status || sdkError?.response?.status || 500;
-              
-              res.setHeader('Content-Type', 'application/json');
-              
-              if (status === 429) {
-                res.statusCode = 429;
+              }
+
+              // Edge Safety Structural Validation
+              if (!validateSchema(responseText)) {
+                console.error("Failed structural validation. LLM hallucinated JSON schema.");
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 500;
                 return res.end(JSON.stringify({ 
-                  error: "rate_limit", 
-                  message: "The system is currently busy analyzing multiple prescriptions. Please wait 60 seconds and try again." 
+                  error: "unreadable", 
+                  message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
                 }));
               }
 
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(responseText);
+
+            } catch (error) {
+              console.error("Outer request processing error:", error);
+              res.setHeader('Content-Type', 'application/json');
               res.statusCode = 500;
-              return res.end(JSON.stringify({ 
+              res.end(JSON.stringify({ 
                 error: "unreadable", 
                 message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
               }));
             }
-
-            res.setHeader('Content-Type', 'application/json');
-            res.statusCode = 200;
-            res.end(response.text);
-
-          } catch (error) {
-            console.error("Outer request processing error:", error);
-            res.setHeader('Content-Type', 'application/json');
-            res.statusCode = 500;
-            res.end(JSON.stringify({ 
-              error: "unreadable", 
-              message: "The uploaded image is too blurry. Please take a clearer photo in good lighting." 
-            }));
-          }
           });
         } else {
           next();
