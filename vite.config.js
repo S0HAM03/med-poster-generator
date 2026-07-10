@@ -7,7 +7,7 @@ function apiPlugin(env) {
     name: 'api-plugin',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        if (req.url === '/api/analyze-prescription/route' && req.method === 'POST') {
+        if (req.url === '/api/analyze' && req.method === 'POST') {
           let body = '';
           req.on('data', chunk => {
             body += chunk.toString();

@@ -9,7 +9,7 @@ export function useVisionApi() {
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/analyze-prescription/route', {
+      const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: base64Image })
